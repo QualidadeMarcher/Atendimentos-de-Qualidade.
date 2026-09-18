@@ -9,6 +9,8 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore-compat.js"></script>
   <script>
     tailwind.config = {
       theme: {
@@ -238,16 +240,70 @@
   </main>
 
   <script>
+    // ====== CONFIGURAÇÃO DO FIREBASE ======
+    // Cole aqui o objeto "firebaseConfig" que o Firebase te deu ao registrar o app web.
+    // Vá em: Firebase Console → Configurações do projeto → Seus apps → (ícone </>) → SDK
+    const firebaseConfig = {
+      apiKey: "AIzaSyCkW9hp89jjdB6Vyy53dy1ayUO26GAuS2I",
+      authDomain: "atendimento-a-linha-marcher.firebaseapp.com",
+      projectId: "atendimento-a-linha-marcher",
+      storageBucket: "atendimento-a-linha-marcher.firebasestorage.app",
+      messagingSenderId: "896037737941",
+      appId: "1:896037737941:web:a874f7354e539b09f9d95c"
+    };
+
+    let firebaseOk = false;
+    let db = null;
+    try {
+      if (firebaseConfig.apiKey !== "COLE_AQUI") {
+        firebase.initializeApp(firebaseConfig);
+        db = firebase.firestore();
+        firebaseOk = true;
+      }
+    } catch (err) {
+      console.error('Erro ao inicializar o Firebase:', err);
+    }
+    const RECORDS_COLLECTION = 'atendimentos';
+    // ====== FIM DA CONFIGURAÇÃO DO FIREBASE ======
+
     const form = document.getElementById('lineForm');
     const recordsTable = document.getElementById('recordsTable');
     const previewEvidencias = document.getElementById('previewEvidencias');
-    const STORAGE_KEY = 'marcher_atendimento_linha_records';
-    let records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+    const STORAGE_KEY = 'marcher_atendimento_linha_records'; // usado só como reserva offline
+    let records = []; // preenchido a partir do Firestore (ou do localStorage, se o Firebase não estiver configurado)
     let currentPhotos = []; // base64 previews for the record currently being filled
 
     // Preenche a data atual por padrão
     document.getElementById('data').valueAsDate = new Date();
-    renderTable();
+
+    if (firebaseOk) {
+      // Aviso amarelo enquanto carrega pela primeira vez
+      recordsTable.innerHTML = `<tr><td colspan="12" class="p-4 text-center text-gray-400">Carregando registros da nuvem...</td></tr>`;
+
+      // Ouve em tempo real: qualquer dispositivo que salvar um registro atualiza
+      // automaticamente a tabela em todos os outros dispositivos abertos.
+      db.collection(RECORDS_COLLECTION).orderBy('criadoEm', 'asc').onSnapshot(async (snapshot) => {
+        const novosRecords = [];
+        for (const doc of snapshot.docs) {
+          const data = doc.data();
+          // Busca as fotos do registro (guardadas numa subcoleção para não
+          // estourar o limite de 1MB por documento do Firestore)
+          const fotosSnap = await db.collection(RECORDS_COLLECTION).doc(doc.id).collection('fotos').orderBy('ordem', 'asc').get();
+          const fotos = fotosSnap.docs.map(f => f.data().base64);
+          novosRecords.push({ id: doc.id, ...data, fotos });
+        }
+        records = novosRecords;
+        renderTable();
+      }, (err) => {
+        console.error('Erro ao ler registros do Firestore:', err);
+        alert('Não foi possível carregar os registros da nuvem. Verifique sua internet e as regras do Firestore (veja o console do navegador para o erro completo).');
+      });
+    } else {
+      // Firebase não configurado: usa o localStorage como antes (dados ficam só neste aparelho)
+      records = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+      renderTable();
+      console.warn('Firebase não configurado — os registros estão sendo salvos apenas neste navegador (não sincronizam entre dispositivos). Preencha o firebaseConfig no topo do <script> para ativar a nuvem.');
+    }
 
     // Converte qualquer imagem (PNG, WEBP, HEIC-suportado pelo navegador, etc.) para JPG,
     // redimensionando para um tamanho razoável (evita arquivos gigantes que travam o
@@ -420,15 +476,16 @@
     });
 
     function saveRecords() {
+      // Reserva: mantém uma cópia no localStorage mesmo quando o Firebase está
+      // ativo, para o caso de a internet cair no meio do uso.
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(records));
       } catch (err) {
-        console.error('Erro ao salvar no localStorage:', err);
-        alert('Não foi possível salvar o registro localmente (armazenamento cheio). Tente remover fotos antigas ou usar menos fotos por registro.');
+        console.error('Erro ao salvar reserva local:', err);
       }
     }
 
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
 
       const record = {
@@ -442,22 +499,66 @@
         descricaoItem: document.getElementById('descricaoItem').value,
         problema: document.getElementById('problema').value,
         solucao: document.getElementById('solucao').value,
-        resumoRetrabalho: document.getElementById('resumoRetrabalho').value,
-        fotos: currentPhotos
+        resumoRetrabalho: document.getElementById('resumoRetrabalho').value
       };
 
-      records.push(record);
-      saveRecords();
-      renderTable();
+      const btnSalvar = form.querySelector('button[type="submit"]');
+      const textoOriginalBtn = btnSalvar ? btnSalvar.textContent : null;
+
+      if (firebaseOk) {
+        try {
+          if (btnSalvar) { btnSalvar.disabled = true; btnSalvar.textContent = 'Salvando...'; }
+
+          const docRef = await db.collection(RECORDS_COLLECTION).add({
+            ...record,
+            criadoEm: firebase.firestore.FieldValue.serverTimestamp()
+          });
+
+          // Salva cada foto como um documento separado na subcoleção "fotos"
+          // (evita o limite de 1MB por documento do Firestore quando há várias fotos)
+          for (let i = 0; i < currentPhotos.length; i++) {
+            await docRef.collection('fotos').add({ base64: currentPhotos[i], ordem: i });
+          }
+          // A tabela é atualizada automaticamente pelo listener em tempo real (onSnapshot)
+        } catch (err) {
+          console.error('Erro ao salvar no Firestore:', err);
+          alert('Não foi possível salvar na nuvem. Verifique sua internet e tente novamente. O registro NÃO foi salvo.');
+          if (btnSalvar) { btnSalvar.disabled = false; btnSalvar.textContent = textoOriginalBtn; }
+          return;
+        }
+        if (btnSalvar) { btnSalvar.disabled = false; btnSalvar.textContent = textoOriginalBtn; }
+      } else {
+        // Sem Firebase configurado: mantém o comportamento antigo (só local)
+        records.push({ ...record, fotos: currentPhotos });
+        saveRecords();
+        renderTable();
+      }
+
       form.reset();
       document.getElementById('data').valueAsDate = new Date();
       currentPhotos = [];
       previewEvidencias.innerHTML = '';
     });
 
-    document.getElementById('btnClear').addEventListener('click', () => {
+    document.getElementById('btnClear').addEventListener('click', async () => {
       if (records.length === 0) return;
-      if (confirm('Tem certeza que deseja apagar todos os registros?')) {
+      if (!confirm('Tem certeza que deseja apagar todos os registros? Essa ação não pode ser desfeita.')) return;
+
+      if (firebaseOk) {
+        try {
+          for (const r of records) {
+            const fotosSnap = await db.collection(RECORDS_COLLECTION).doc(r.id).collection('fotos').get();
+            for (const f of fotosSnap.docs) {
+              await f.ref.delete();
+            }
+            await db.collection(RECORDS_COLLECTION).doc(r.id).delete();
+          }
+          // A tabela é atualizada automaticamente pelo listener em tempo real
+        } catch (err) {
+          console.error('Erro ao apagar registros no Firestore:', err);
+          alert('Não foi possível apagar todos os registros na nuvem. Tente novamente.');
+        }
+      } else {
         records = [];
         saveRecords();
         renderTable();
@@ -490,11 +591,32 @@
       `).join('');
 
       document.querySelectorAll('.btnDelete').forEach(btn => {
-        btn.addEventListener('click', (e) => {
+        btn.addEventListener('click', async (e) => {
           const idx = parseInt(e.target.getAttribute('data-idx'));
-          records.splice(idx, 1);
-          saveRecords();
-          renderTable();
+          const registro = records[idx];
+          if (!confirm('Excluir este registro?')) return;
+
+          if (firebaseOk && registro.id) {
+            try {
+              e.target.disabled = true;
+              e.target.textContent = 'Excluindo...';
+              const fotosSnap = await db.collection(RECORDS_COLLECTION).doc(registro.id).collection('fotos').get();
+              for (const f of fotosSnap.docs) {
+                await f.ref.delete();
+              }
+              await db.collection(RECORDS_COLLECTION).doc(registro.id).delete();
+              // A tabela é atualizada automaticamente pelo listener em tempo real
+            } catch (err) {
+              console.error('Erro ao excluir registro no Firestore:', err);
+              alert('Não foi possível excluir na nuvem. Tente novamente.');
+              e.target.disabled = false;
+              e.target.textContent = 'Excluir';
+            }
+          } else {
+            records.splice(idx, 1);
+            saveRecords();
+            renderTable();
+          }
         });
       });
     }

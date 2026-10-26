@@ -54,8 +54,9 @@
           <option value="Expedição">Expedição</option>
         </select>
       </div>
-      <div id="adminBox" class="text-sm flex items-center gap-2" style="display:none">
+      <div id="adminBox" class="text-sm flex items-center gap-2">
         <span id="adminBadge" class="hidden text-xs bg-green-600 px-2 py-1 rounded font-semibold">Administrador</span>
+        <span id="adminOffline" class="hidden text-xs bg-red-600 px-2 py-1 rounded font-semibold" title="Recarregue a página com Ctrl + F5">Sem conexão com o banco</span>
         <button type="button" id="btnAdminLogin" class="text-xs bg-gray-700 hover:bg-gray-600 border border-gray-500/40 px-3 py-1.5 rounded-lg font-semibold">Entrar como administrador</button>
         <button type="button" id="btnAdminLogout" class="hidden text-xs bg-gray-700 hover:bg-gray-600 border border-gray-500/40 px-3 py-1.5 rounded-lg font-semibold">Sair</button>
       </div>
@@ -296,7 +297,11 @@
         db = firebase.firestore();
         // Redes de empresa, proxies e alguns navegadores bloqueiam a conexão em tempo real
         // do Firestore. Este modo usa requisições comuns e funciona nesses casos.
-        db.settings({ experimentalForceLongPolling: true, useFetchStreams: false, merge: true });
+        try {
+          db.settings({ experimentalForceLongPolling: true });
+        } catch (e) {
+          console.warn('Não foi possível ativar o modo de conexão alternativo:', e);
+        }
         firebaseOk = true;
       }
     } catch (err) {
@@ -371,10 +376,12 @@
 
     function updateAdminUI() {
       const box = document.getElementById('adminBox');
-      if (box) box.style.display = (firebaseOk && auth) ? 'flex' : 'none';
+      const disponivel = !!(firebaseOk && auth);
+      if (box) box.style.display = 'flex';
+      document.getElementById('adminOffline').classList.toggle('hidden', disponivel);
       document.getElementById('adminBadge').classList.toggle('hidden', !isAdmin);
       document.getElementById('btnAdminLogout').classList.toggle('hidden', !isAdmin);
-      document.getElementById('btnAdminLogin').classList.toggle('hidden', isAdmin);
+      document.getElementById('btnAdminLogin').classList.toggle('hidden', isAdmin || !disponivel);
       const btnClear = document.getElementById('btnClear');
       if (btnClear) btnClear.style.display = canDelete() ? '' : 'none';
       if (!canEdit() && editingId) cancelarEdicao();
